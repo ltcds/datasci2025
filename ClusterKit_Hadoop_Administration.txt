@@ -1,0 +1,752 @@
+https://etherpad.opendev.org/laotel-hdp
+Hadoop Administration 
+Hortonwork Data Platform (HDP) 3.1.5 + Hue + FreeIPA
+Before start
+Presentation file at https://www.dropbox.com/scl/fi/7onxdzcckkjwgkof2506g/HadoopBootCampV3-2025-04-21.pdf?rlkey=6ovaiv4s5gh1rr9yn2oqp3rww&dl=0
+HDP + Hue + FreeIPA Installation Guide (Thai) https://www.clusterkit.co.th/pdf/HDP-Hue-FreeIPA-InstallationGuide.pdf
+Don't CUT on this etherpad, everyone can write.
+
+Topics
+1. Linux environment Preparation 
+2. Install and setup Apache Ambari
+3. Install Hadoop (Hortonworks Data Platform) 
+4. Setup high-availability for HDFS and YARN
+5. Install FreeIPA (LDAP)
+6. Config apache ranger authen with FreeIPA
+7. Setup Hue 
+8. Setup zeppelin authen with LDAP
+
+# Download SSH key at https://www.dropbox.com/scl/fi/j3g58a0ylpca0tglhnjkl/hadooptraining.zip?rlkey=nf05im10pz2280p6kdi6nt1ym&dl=0
+
+Cluster 1 spec (OLS)
+Edge       8Vcores, 64GB | 203.154.91.42 | 192.168.0.11
+master1    4Vcores, 16GB | 203.154.91.64 | 192.168.0.8
+master2    4Vcores, 16GB | 203.154.91.61 | 192.168.0.21
+worker1    8Vcores, 32GB | 203.154.91.110 | 192.168.0.15
+worker2    8Vcores, 32GB | 203.154.91.252 | 192.168.0.14
+worker3    8Vcores, 32GB | 203.154.91.63 | 192.168.0.28
+IPA        2Vcores,  4GB | 203.154.91.140 | 192.168.0.13
+
+# ssh to edge nodes
+ssh -i hadooptraining.pem root@203.154.91.140
+
+Cluster 2 spec (Cluste Kit)
+Edge      4Vcores, 16GB
+master    4Vcores, 16GB
+worker    4Vcores, 16GB
+IPA       2Vcores,  4GB
+
+# ssh to edge nodes
+ssh -i hadooptraining.pem -p 2222 root@clusterkit.ddns.net
+
+
+Cluster 3 spec (OSL) ** This cluster will remove after administration course
+Edge       8Vcores, 64GB | 203.154.91.15 | 192.168.0.6
+master1    4Vcores, 16GB | 203.154.91.147 | 192.168.0.37
+master2    4Vcores, 16GB | 203.154.91.80 | 192.168.0.4
+worker1    8Vcores, 32GB | 203.154.91.82 | 192.168.0.23
+worker2    8Vcores, 32GB | 203.150.243.28 | 192.168.0.14
+worker3    8Vcores, 32GB | 203.150.243.156 | 192.168.0.3
+IPA        2Vcores,  4GB | 203.150.243.42 | 192.168.0.20
+
+# ssh to edge nodes
+ssh -i hadooptraining.pem root@203.154.91.15
+
+
+# Linux environment Preparation 
+# 1. create /etc/hosts file 
+1.1 Cluster 1 (OLS)
+192.168.0.13        ipa.example.com    		ipa
+192.168.0.11        edge.example.com    	edge
+192.168.0.8         master1.example.com    master1
+192.168.0.21        master2.example.com    master2
+192.168.0.15        worker1.example.com    worker1
+192.168.0.14        worker2.example.com    worker2
+192.168.0.28        worker3.example.com    worker3
+
+1.2 Cluster 2 (Cluster Kit)
+192.168.123.200        ipa.example.com        ipa
+192.168.123.201        edge.example.com       edge
+192.168.123.202        master1.example.com    master1
+192.168.123.203        master2.example.com    master2
+192.168.123.204        worker1.example.com    worker1
+192.168.123.205        worker2.example.com    worker2
+192.168.123.206        worker3.example.com    worker3
+
+1.3 Cluster 3 (OLS)
+192.168.0.6         ipa.example.com    ipa
+192.168.0.37        edge.example.com    edge
+192.168.0.4         master1.example.com    master1
+192.168.0.23        master2.example.com    master2
+192.168.0.15        worker1.example.com    worker1
+192.168.0.11        worker2.example.com    worker2
+192.168.0.18        worker3.example.com    worker3
+
+# 2. create ssh key on edge node and send to all nodes (no need on OLS)
+# put key to edge node
+ssh-keygen
+ssh-copy-id master1
+ssh-copy-id master2
+ssh-copy-id worker1
+ssh-copy-id worker2
+ssh-copy-id worker3
+ssh-copy-id edge
+
+# 2.1 Set hostnaem (FQDN) (one by one because first time remote need to say yes for receive key)
+hostnamectl set-hostname edge.example.com
+ssh master1 hostnamectl set-hostname master1.example.com
+ssh master2 hostnamectl set-hostname master2.example.com
+ssh worker1 hostnamectl set-hostname worker1.example.com
+ssh worker2 hostnamectl set-hostname worker2.example.com
+ssh worker3 hostnamectl set-hostname worker3.example.com
+
+# 2.2 prepare parallel command
+# 2.2.1 Install pdsh
+yum install -y epel-release
+yum install -y pdsh
+
+# 2.2.2 create hosts file contain all hostname except edge 
+vi hosts
+master1 
+master2 
+worker1 
+worker2 
+worker3 
+
+# 2.2.3 test pdsh
+pdsh -w ^hosts hostname
+
+# 2.3 Prepare script for copy file to all hosts 
+mkdir bin
+vi bin/pscp
+
+### create /root/bin/pscp script
+#!/bin/sh
+
+for i in `cat /root/hosts`
+do
+   echo "scp $1 ${i}:$1"
+  scp $1 ${i}:$1
+done
+###
+
+chmod +x bin/pscp 
+
+# 3. Disable SELinux
+sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+setenforce 0
+pdsh -w ^hosts setenforce 0
+pdsh -w ^hosts getenforce
+pscp /etc/selinux/config
+
+# 4. send /etc/hosts to all host
+pscp /etc/hosts
+
+# 5. Enable NTP
+systemctl enable --now chronyd
+pdsh -w ^hosts systemctl enable --now chronyd
+
+# 6. Allow Firewall (no need on OLS)
+# allow firewall for ambari on edge node
+firewall-cmd --zone=public --permanent --add-port=8080/tcp
+
+# allow all ports come from 192.168.123.0 
+firewall-cmd --zone=trusted --add-source=192.168.123.0/24
+firewall-cmd --runtime-to-permanent
+
+pdsh -w ^hosts firewall-cmd --zone=trusted --add-source=192.168.123.0/24
+pdsh -w ^hosts firewall-cmd --runtime-to-permanent
+
+
+# 7. setup DBMS (in this workshop use mariaDB)
+# 7.1 install mariadb
+yum install -y mariadb-server 
+
+# 7.2 edit /etc/my.cnf.d/server.cnf (workshop ไม่ต้องทำครับ)
+# Config mariadb https://www.cloudera.com/documentation/enterprise/6/6.3/topics/install_cm_mariadb.html#install_cm_mariadb_config
+# InnoDB settings in [mysqld]
+innodb_buffer_pool_size=1024M 
+innodb_flush_method = O_DIRECT
+
+# 7.3 start mariadb
+systemctl enable --now mariadb
+# /usr/bin/mysql_secure_installation
+
+# 7.4 setup MySQL JDBC
+cd
+yum install -y wget bash-completion-extras
+wget https://dev.mysql.com/get/Downloads/Connector-J/mysql-connector-java-5.1.49.tar.gz
+tar xvf mysql-connector-java-5.1.49.tar.gz 
+mkdir -p /usr/share/java
+cp mysql-connector-java-5.1.49/mysql-connector-java-5.1.49.jar /usr/share/java
+ln -sf /usr/share/java/mysql-connector-java-5.1.49.jar /usr/share/java/mysql-connector-java.jar 
+
+
+# Install Ambari
+https://docs.hortonworks.com/HDPDocuments/Ambari/Ambari-2.7.4.0/index.html
+# 1. Download the Ambari repository file to a directory on your installation host.
+wget -nv http://repos.clusterkit.co.th/ambari/centos7/2.7.5.0-72/ambari.repo -O /etc/yum.repos.d/ambari.repo
+
+# Edit /etc/yum.repos.d/ambari.repo change "baseurl and gpgkey"
+#VERSION_NUMBER=2.7.5.0-72
+[ambari-2.7.5.0]
+#json.url = http://repos.clusterkit.co.th/hdp_urlinfo.json
+name=ambari Version - ambari-2.7.5.0
+baseurl=http://repos.clusterkit.co.th/ambari/centos7/2.7.5.0-72/
+gpgcheck=1
+gpgkey=http://repos.clusterkit.co.th/ambari/centos7/2.7.5.0-72/RPM-GPG-KEY/RPM-GPG-KEY-Jenkins
+enabled=1
+priority=1
+
+# 2. Install the Ambari.
+yum install -y ambari-server
+
+# 2.1 change link for download JDK to local repo
+sed -i 's/public-repo-1.hortonworks.com/repos.clusterkit.co.th/g' /etc/ambari-server/conf/ambari.properties
+
+# 2.2 Set Up the Ambari Server
+# ambari-server setup 
+
+# The default PostgreSQL database name is ambari. The default user name and password are ambari/bigdata
+# Using MariaDB reference
+#https://docs.hortonworks.com/HDPDocuments/Ambari-2.7.3.0/administering-ambari/content/amb_example_install_mysql-mariadb_for_multiple_components.html
+
+# 2.3 Creating Databases 
+mysql
+ create database ambari;
+ grant all privileges on ambari.* to 'ambari'@'localhost' identified by 'password';
+ grant all privileges on ambari.* to 'ambari'@'%' identified by 'password';
+ grant all privileges on ambari.* to 'ambari'@'edge.example.com' identified by 'password';
+
+ create database hive;
+ grant all privileges on hive.* to 'hive'@'localhost' identified by 'password';
+ grant all privileges on hive.* to 'hive'@'%' identified by 'password';
+ grant all privileges on hive.* to 'hive'@'edge.example.com' identified by 'password';
+
+ create database ranger;
+ grant all privileges on ranger.* to 'rangeradmin'@'localhost' identified by 'password';
+ grant all privileges on ranger.* to 'rangeradmin'@'%' identified by 'password';
+ grant all privileges on ranger.* to 'rangeradmin'@'edge.example.com' identified by 'password';
+
+ create database rangerkms;
+ grant all privileges on rangerkms.* to rangerkms@'localhost' identified by 'password';
+ grant all privileges on rangerkms.* to rangerkms@'%' identified by 'password';
+ grant all privileges on rangerkms.* to rangerkms@'edge.example.com' identified by 'password';
+
+ create database oozie;
+ grant all privileges on oozie.* to 'oozie'@'localhost' identified by 'password';
+ grant all privileges on oozie.* to 'oozie'@'%' identified by 'password';
+ grant all privileges on oozie.* to 'oozie'@'edge.example.com' identified by 'password';
+
+CREATE DATABASE hue DEFAULT CHARACTER SET utf8 DEFAULT COLLATE utf8_general_ci;
+GRANT ALL ON hue.* TO 'hue'@'%' IDENTIFIED BY 'password';
+grant all on hue.* to 'hue'@'localhost' identified by 'password';
+grant all on hue.* to 'hue'@'edge.example.com' identified by 'password';
+
+use ambari;
+source /var/lib/ambari-server/resources/Ambari-DDL-MySQL-CREATE.sql
+exit;
+
+# 2.4 config ambari
+ambari-server setup --jdbc-db=mysql --jdbc-driver=/usr/share/java/mysql-connector-java.jar
+
+# 2.5 Ambari setup and start
+ambari-server setup
+ambari-server start
+
+# To check the Ambari Server processes:
+# ambari-server status
+
+# To stop the Ambari Server:
+# ambari-server stop
+
+# 2.6 Login to Ambari http://<server_host>:8080
+# Log in to the Ambari Server using the default user name/password: admin/admin.
+
+# view ambari-server log
+tail -f /var/log/ambari-server/ambari-server.log 
+
+
+# 3. Install Hadoop (Hortonwork)
+# on Ambari
+# Select Repository (use local repo)
+http://repos.clusterkit.co.th/HDP/centos7/3.1.5.0-152/
+http://repos.clusterkit.co.th//HDP-GPL/centos7/3.1.4.0-315/
+http://repos.clusterkit.co.th//HDP-UTILS/centos7/1.1.0.22/
+
+edge.example.com 
+master1.example.com 
+master2.example.com 
+worker1.example.com 
+worker2.example.com 
+worker3.example.com 
+
+# Password policy แบ่งสองแบบ แบบง่ายกับแบบยาก(ต้องการตัวเลขตัวอักษรใหญ่ผสม)
+แบบง่าย password
+แบบยาก P@ssw0rd พวก ranger & atlas
+Ranger Admin user's password for Ambari ต้องการยากกว่า แต่เราไม่ต้องไปยุ่ง
+
+
+** Permanently fix the public hostname: (Recommended)
+# bug in ambari-agent when Confirm Hosts only edge.example.com cannot register, แก้ด้วยวิธีการตามลิงค์ต่อไปนี้
+https://community.cloudera.com/t5/Community-Articles/Why-ambari-host-might-have-different-public-host-name-and/ta-p/24666
+
+1. Create a file with name : "/var/lib/ambari-agent/public_hostname.sh" then in that file add the following line:
+#!/bin/sh
+echo `hostname -f`
+
+2. Make sure that the file "/var/lib/ambari-agent/public_hostname.sh" has proper execute permission. Example:
+chmod 755 "/var/lib/ambari-agent/public_hostname.sh"
+
+3. On every ambari-agent host edit the file "/etc/ambari-agent/conf/ambari-agent.ini" and in the [agent] section add the following line:
+## Added following to customize the public hostname
+public_hostname_script=/var/lib/ambari-agent/public_hostname.sh
+
+NOTE: Users can also use the property "hostname_script" to customize the internal hostname.
+
+4. Make sure that the changes are pushed to all the hosts present in the ambari cluster.
+pscp /var/lib/ambari-agent/public_hostname.sh
+pscp /etc/ambari-agent/conf/ambari-agent.ini
+
+5. Now restart the agents.
+ambari-agent restart
+
+6. send to all hosts
+pscp /var/lib/ambari-agent/public_hostname.sh
+pscp /etc/ambari-agent/conf/ambari-agent.ini
+pdsh -w ^hosts ambari-agent restart
+### end of bug fixed ###
+
+# Solve YARN Registry DNS (พอร์ต 53 ชน)
+systemctl disable --now libvirtd.service
+ip link set virbr0 down
+brctl delbr virbr0
+
+# Services start order
+Zookeeper --> Ranger --> HDFS --> Infra Solr --> HBase --> Atlas --> Yarn --> All remaining
+
+
+# 4. Set high availability
+# 4.1 High Availability HDFS
+HDFS --> ACTIONS --> Enable Namenode HA
+
+# 4.2 High Availability Yarn
+YARN --> ACTIONS --> Enable ResourceManager HA
+
+
+# 5. FreeIPA - Identity, Policy, Audit
+# Provide LDAP like a Active Directory 
+# ref. 
+https://www.freeipa.org/
+https://www.linuxtechi.com/install-freeipa-rhel-rocky-almalinux/
+
+# 5.1 Set hostname
+hostnamectl set-hostname ipa.example.com
+
+# 5.2 Install and setup FreeIPA
+yum install -y ipa-server 
+ipa-server-install
+
+# FreeIPA server installation step (Default all except last question)
+Do you want to configure integrated DNS (BIND)? [no]: 
+Server host name [ipa.example.com]: 
+Please confirm the domain name [example.com]: 
+Please provide a realm name [EXAMPLE.COM]: 
+Directory Manager password: 
+IPA admin password: 
+NetBIOS domain name [EXAMPLE]: 
+Do you want to configure chrony with NTP server or pool address? [no]: 
+Continue to configure the system with these values? [no]: yes
+... waiting around five minutes ...
+
+# 5.3 Allow firewall
+firewall-cmd --add-service=freeipa-ldap --permanent
+firewall-cmd --add-service=freeipa-ldap
+
+# 5.4 Verification & Access FreeIPA admin portal
+ipactl status
+kinit admin
+
+# 5.5 Mapping host file and access IPA web 
+# on Linux /etc/hosts
+# on Windows C:\Windows\System32\Drivers\etc\hosts
+203.154.91.140        ipa.example.com
+
+# open web browser to https://ipa.example.com/ipa/ui/
+
+# 5.6 Install IPA client (All hadoop nodes)
+# 5.6.1 Install IPA client
+yum install -y ipa-client
+
+# 5.6.2 Setup IPA client
+ipa-client-install --server=ipa.example.com --domain=EXAMPLE.COM --mkhomedir
+
+# 5.7 Install ldap client (at edge node)
+yum install -y openldap-clients
+
+# 5.8 create bind account (use for binding instead admin account for security) 
+kinit admin 
+ldapmodify -x -D 'cn=Directory Manager' -W
+
+dn: uid=system,cn=sysaccounts,cn=etc,dc=example,dc=com
+changetype: add
+objectclass: account
+objectclass: simplesecurityobject
+uid: system
+userPassword: password
+passwordExpirationTime: 20380119031407Z
+nsIdleTimeout: 0
+
+# enter มาเรื่อย จะกลับคืนสู่ prompt เอง ถ้าไม่ก็กด Ctrl+d
+
+# for delete Directory manager
+# ldapdelete -D "cn=Directory Manager" -W -x "uid=system,cn=sysaccounts,cn=etc,dc=example,dc=com"
+
+
+# 6. Ranger configuration 
+# 6.1 Import IPA CA cert to JDK 
+export JAVA_HOME=/usr/jdk64/jdk1.8.0_112/
+/usr/jdk64/jdk1.8.0_112/bin/keytool -import -trustcacerts -alias MyLdap -file /etc/ipa/ca.crt -keystore /usr/jdk64/jdk1.8.0_112/jre/lib/security/cacerts
+
+# password: changeit
+
+# 6.2 Set ranger usage JDK cacerts (on ambari)
+ambari --> ranger --> ranger.usersync.truststore.file=/usr/jdk64/jdk1.8.0_112/jre/lib/security/cacerts
+
+# 6.3 Config Ranger authen with LDAP (on ambari)
+https://docs.cloudera.com/HDPDocuments/HDP3/HDP-3.1.4/ambari-authentication-ldap-ad/content/amb_freeIPA_ladap_setup_example.html
+
+Ranger User Info --> Sync Source: LDAP/AD
+
+Enable User Sync = Yes
+
+COMMON CONFIGS
+- LDAP/AD URL: ldap://ipa.example.com
+- Bind User: uid=system,cn=sysaccounts,cn=etc,dc=example,dc=com
+- Bind User Password: 
+- Incremental Sync = Yes
+
+USER CONFIGS
+- Username Attribute: uid
+- User Object Class: posixaccount
+- User Search Base: cn=users,cn=accounts,dc=example,dc=com
+- User Group Name Attribute: uid
+- Group User Map Sync  = Yes
+- Enable User Search = Yes
+
+GROUP CONFIGS
+- Enable Group Sync  = Yes
+- Group Member Attribute: groups
+- Group Name Attribute: cn
+- Group Object Class: posixgroup
+- Group Search Base: cn=groups,cn=accounts,dc=example,dc=com
+- Enable Group Search First = yes
+- Sync Nested Groups = no
+      
+###
+
+
+# 7. Hue
+# 7.1 Install docker
+wget -O /etc/yum.repos.d/docker-ce.repo https://download.docker.com/linux/centos/docker-ce.repo
+yum install -y docker-ce docker-ce-cli containerd.io
+systemctl enable --now docker
+
+# 7.2 Start Hue from docker
+sudo docker run -d -p 8888:8888 --network=host --name hue gethue/hue:20250207-140101
+# hue version ใหม่ require mariadb-10.3 ขึ้นไป
+
+# 7.3 Migration Database from SQLite to MariaDB
+# 7.3.1 Copy vi text editor to docker
+docker cp /bin/vi hue:/bin/
+docker cp /lib64/libtinfo.so.5 hue:/lib/x86_64-linux-gnu/
+docker cp /lib64/libtinfo.so.5.9 hue:/lib/x86_64-linux-gnu/
+
+# 7.3.2 Shell to docker hue with root 
+docker exec -it -u 0 hue /bin/bash
+
+# 7.3.3 Add MySQL connection configuration to  hue.ini
+vi desktop/conf/hue.ini
+
+[[database]]
+engine=mysql
+host=edge.example.com
+port=3306
+user=hue
+password=password
+name=hue
+
+# 7.3.4 Migration
+build/env/bin/hue syncdb
+build/env/bin/hue migrate
+
+# 7.3.5 Store hue configuration file outside docker
+mkdir hue
+cd hue
+sudo docker cp hue:/usr/share/hue/desktop/conf .
+
+# 7.3.6 stop and remove hue docker
+docker stop hue
+docker rm hue
+
+# 7.4 edit hue configureation file
+vi hue/conf/hue.ini
+
+http_port=8888
+time_zone=Asia/Bangkok
+
+
+[hadoop]
+
+[[[default]]]
+# Enter the filesystem uri
+fs_defaultfs=hdfs://mycluster
+
+
+## WebHDFS/HttpFS
+** ไม่ใช่แค่ browse file แต่ Hue จะ create /user/[username] ให้เมื่อล็อกอิน(ถ้าไม่มี) ถ้าทำ Namenode HA ต้องเซ็ต HTTPFS ให้ได้
+fs_defaultfs=hdfs://mycluster #ใส่ชื่อ nameservice ที่กำหนดตอนทำ HDFS Namenode HA
+    
+# กำหนดชี้ไปยังเครื่องที่ namenode active
+webhdfs_url=http://localhost:50070/webhdfs/v1
+
+# ถ้าเป็น httpfs (สมมุติว่าลง Httpfs ที่เครื่อง master1 มีวิธีการติดตั้งอยู๋ตอนท้าย)
+webhdfs_url=http://master1.example.com:14000/webhdfs/v1/  
+
+
+## Yarn
+resourcemanager_api_url=http://master1.example.com:8088
+proxy_api_url=http://master1.example.com:8088
+history_server_api_url=http://master1.example.com:19888
+logical_name=yarn-cluster
+
+    [[[ha]]]
+      # Resource Manager logical name (required for HA)
+      logical_name=yarn-cluster  # ref. from yarn.resourcemanager.cluster-id
+
+      # Un-comment to enable
+      submit_to=True
+
+      # URL of the ResourceManager API
+      resourcemanager_api_url=http://master2.example.com:8088
+      proxy_api_url=http://master2.example.com:8088
+      history_server_api_url=http://master2.example.com:19888
+
+
+## Hive
+hive_server_host=edge.example.com
+use_sasl=true
+
+oozie_url=http://edge.example.com:11000/oozie
+
+[search]
+# URL of the Solr Server
+solr_url=http://edge.example.com:8886/solr/
+
+
+## Zookeeper
+host_ports=edge.example.com:2181,master1.example.com:2181,master2.example.com:2181
+
+## Authenticate Hue Users with LDAP
+https://docs.cloudera.com/documentation/enterprise/6/6.3/topics/hue_sec_ldap_auth.html
+  backend=desktop.auth.backend.LdapBackend
+    base_dn="DC=example,DC=com"
+    ldap_url=ldaps://ipa.example.com
+    ldap_username_pattern="uid=<username>,cn=users,cn=accounts,dc=example,dc=com"
+    create_users_on_login = true
+    sync_groups_on_login=true
+    search_bind_authentication=true
+      user_filter="objectclass=person"
+      user_name_attr=uid
+      group_filter="objectclass=posixgroup"
+      group_name_attr=cn
+
+           # The attribute of the group object which identifies the members of the group
+      group_member_attr=groups
+      
+      
+## Customize menu 
+  [[interpreters]]
+  - hive
+  - pig
+  - spark2
+  - mapreduce
+  - sqoop1
+  - distcp
+  - และเพิ่ม phoenix เข้าไป 
+      [[[phoenix]]]
+      name=Phoenix
+      interface=sqlalchemy
+      options='{"url": "phoenix://edge.example.com:8765/"}'
+
+### end of hue configureation ###
+
+# Hue https (optional)
+[desktop]
+  [[session]]
+  secure=true
+
+[desktop]
+ ssl_certificate=/path/to/server.cert
+ ssl_private_key=/path/to/server.key
+ secure_ssl_redirect=True
+
+###
+
+
+# 7.5 Configuration for OOZIE
+# 7.5.1 Config proxy user for hue on oozie
+# At ambari --> Oozie --> CONFIGS --> ADVANCED --> "Custom oozie-site" เพื่อให้ใช้ oozie ได้
+oozie.service.ProxyUserService.proxyuser.hue.hosts=*
+oozie.service.ProxyUserService.proxyuser.hue.groups=*
+oozie.processing.timezone GMT+0700
+
+# 7.5.2 Create hue user 
+useradd hue
+
+# 7.5.3 Create home directory for hue user on HDFS (oozie on hue required)
+sudo -u hdfs hdfs dfs -mkdir /user/hue
+sudo -u hdfs hdfs dfs -chown hue:hdfs /user/hue
+sudo -u hdfs hdfs dfs -chmod 755 /user/hue
+
+# 7.6 Add proxy user at core-site.txt (run on ambari)
+Go to HDFS --> Configs --> Advanced Scroll down to expand “Custom core-site”, then click on “Add Property…” to add “hadoop.proxyuser.hue.hosts:*” and “hadoop.proxyuser.hue.groups:*” then “Save"
+
+# 7.7 Start HUE docker 
+docker run -d -p 8888:8888 --name hue --network=host -e TZ=Asia/Bangkok --restart=always -v /root/hue/conf/hue.ini:/usr/share/hue/desktop/conf/hue.ini gethue/hue:20250207-140101
+
+# 7.8 Using Hue
+open web browser to http://edge.example.com:8888 
+
+# 7.9 Setup HTTPFS
+# webhdfs working on active namenode but hue can specific only one, httpfs can working both active and standby namenode.
+
+# 7.9.1 Install hadoop-httpfs (At all Namenode)
+yum install -y hadoop-httpfs
+echo "1q2w3e4r" > /usr/hdp/3.1.5.0-152/hadoop/conf/httpfs-signature.secret
+
+vi /usr/lib/systemd/system/hadoop-httpfs.service
+###
+[Unit]
+Description = Start Hadoop HttpFS service
+After = network.target
+
+[Service]
+Type=forking
+Restart=always
+User=hdfs
+ExecStart = /bin/hdfs --daemon start httpfs
+[Install]
+WantedBy = multi-user.target 
+###
+
+mkdir /usr/hdp/3.1.5.0-152/hadoop-hdfs/temp
+chmod 1777 /usr/hdp/3.1.5.0-152/hadoop-hdfs/temp
+
+systemctl enable hadoop-httpfs.service
+systemctl daemon-reload
+systemctl start hadoop-httpfs
+
+# 7.9.2 ทดลองใช้งาน 
+http://master1.example.com:14000/webhdfs/v1?op=gethomedirectory&user.name=kittirak
+
+# 7.9.3 HTTPFS+HUE
+# configuration เพื่อให้ Hue สามารถใช้ httpfs ได้ ทำที่เครื่องที่รัน httpfs (master1,2)
+# ไฟล์คอนฟิกเต็ม ดูได้ที่ https://github.com/hunshenshi/hadoop-3.2.0-read/blob/master/hadoop-hdfs-project/hadoop-hdfs-httpfs/src/main/resources/httpfs-default.xml
+
+vi /usr/hdp/current/hadoop-client/conf/httpfs-site.xml
+##
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<configuration>
+  <property>
+    <name>httpfs.proxyuser.hue.hosts</name>
+    <value>*</value>
+  </property>
+
+  <property>
+    <name>httpfs.proxyuser.hue.groups</name>
+    <value>*</value>
+  </property>
+</configuration>
+##
+
+systemctl restart hadoop-httpfs
+# แล้วดูหน้า Hue ว่า browse file ได้หรือไม่
+
+
+# 8. Zeppelin authentication with LDAP
+# At ambari --> Zeppelin Notebook --> CONFIGS --> "Advanced zeppelin-shiro-ini"
+# 8.1 remark all in [users] section
+# 8.2 config ldap in [main] section 
+### A sample for configuring LDAP Directory Realm
+ldapRealm = org.apache.zeppelin.realm.LdapGroupRealm
+## search base for ldap groups (only relevant for LdapGroupRealm):
+ldapRealm.contextFactory.environment[ldap.searchBase] = dc=example,dc=com
+ldapRealm.contextFactory.url = ldaps://ipa.example.com
+ldapRealm.userDnTemplate = uid={0},cn=users,cn=accounts,dc=example,dc=com
+ldapRealm.contextFactory.authenticationMechanism = SIMPLE
+
+# 8.3 restart zeppelin
+
+# 8.4 Set  User Impersonate for zeppelin
+8.4.1 Set the user(zeppelin) to be enable to set proxyuser in core-site.xml
+<property>
+  <name>hadoop.proxyuser.zeppelin.groups</name>
+  <value>*</value>
+</property>
+<property>
+  <name>hadoop.proxyuser.zeppelin.users</name>
+  <value>*</value>
+</property>
+<property>
+  <name>hadoop.proxyuser.zeppelin.hosts</name>
+  <value>*</value>
+</property>
+
+8.4.2 Configure impersonation for interpreter, follow topic 5 in this link https://zeppelin.apache.org/docs/0.10.0/usage/interpreter/user_impersonation.html
+
+
+# 8.5 Install python-3.7 (at edge and all workers)
+# spark 2.3.2 รองรับสูงที่ Python3.7  https://community.cloudera.com/t5/Community-Articles/Spark-Python-Supportability-Matrix/ta-p/379144
+
+# 8.5.1 Install dependency
+yum install xz-devel zlib-devel bzip2-devel openssl-devel cyrus-sasl-devel krb5-devel libffi-devel libxml2-devel libxslt-devel mariadb-devel openldap-devel python-devel sqlite-devel gmp-devel 
+
+# 8.5.2 Compile
+wget https://www.python.org/ftp/python/3.7.17/Python-3.7.17.tgz
+tar xvf Python-3.7.17.tgz
+cd Python-3.7.17
+./configure --enable-optimizations
+make altinstall
+
+# 8.5.3 set alternative
+alternatives --install "/usr/bin/python3" "python3" "/usr/local/bin/python3.7" 1 \
+        --slave /usr/bin/pip3 pip3 /usr/local/bin/pip3.7 \
+        --slave /usr/bin/pydoc3 pydoc3 /usr/bin/pydoc3.7 
+
+alternatives --config python3
+
+# 8.6 set python3 to zeppelin
+Advanced zeppelin-env --> zeppelin_env_content -->  export PYSPARK_PYTHON=python3 
+
+
+# Additional
+# set path for java 
+alternatives --install "/usr/bin/java" "java" "/usr/jdk64/jdk1.8.0_112/bin/java" 1 \
+        --slave /usr/bin/javac javac /usr/jdk64/jdk1.8.0_112/bin/javac \
+        --slave /usr/bin/javaws javaws /usr/jdk64/jdk1.8.0_112/bin/javaws \
+        --slave /usr/bin/jar jar /usr/jdk64/jdk1.8.0_112/bin/jar
+
+
+## FAQ for admin
+if HDFS show warning about last checkpoint run below command for solve
+sudo -u hdfs hdfs dfsadmin -safemode enter
+sudo -u hdfs hdfs dfsadmin -saveNamespace
+sudo -u hdfs hdfs dfsadmin -safemode leave
+
+NameNode Blocks Health Missing Blocks:[6]
+sudo -u hdfs hdfs fsck -list-corruptfileblocks
+sudo -u hdfs hdfs fsck / -delete
+
+### End of Installation ###
